@@ -2,6 +2,19 @@
 
 Notable changes to this project. Newest first.
 
+## [1.1.0] - 2026-11-22
+- VMs are now updated through the QEMU guest agent; Alpine (`apk`) and Fedora (`dnf`) guests are supported.
+- Guests running Docker now get their OS packages updated too, Docker included.
+- apt uses `dist-upgrade`, keeps existing config files and repairs interrupted `dpkg` runs, so packages are no longer silently held back or stuck on prompts.
+- Fixed: commands run inside guests could read the loop's input, so one prompt could break the rest of the run.
+- Each guest is snapshotted before changes (last 3 kept), with the rollback command in the log.
+- Containers still running old code after an update are restarted and checked; VMs are reported.
+- Docker compose projects are updated with `pull` + `up -d`, so dependent containers (e.g. behind a VPN container) are recreated correctly. Watchtower handles the rest with `--cleanup`.
+- Fixed: Watchtower failures were always reported as OK. Real errors are now reported and the script exits 1 if anything failed.
+- Docker containers that stop during an update are started again; missing restart policies and *Start at boot* settings are flagged (optional fixes: `FIX_RESTART_POLICY=1`, `FIX_ONBOOT=1`).
+- Host: Proxmox packages waiting are listed; `HOST_MODE=full` runs the Proxmox-supported dist-upgrade. Running vs installed kernel is checked.
+- Added `DRY_RUN`, `ONLY_IDS`, `/etc/proxsweep.conf`, a run lock and colour-free log files. README install URL and log path corrected.
+
 ## [1.0.0] - 2026-06-28
 - One command updates a whole Proxmox homelab: the host, every LXC, and Docker, in a single pass.
 - Detects each container's package manager (apt/opkg and the `command -v` pattern) and reports reboot-required clearly — it never reboots automatically.
