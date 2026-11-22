@@ -1,11 +1,24 @@
-# ProxSweep
+<p align="center">
+  <img src="docs/logo.svg" alt="ProxSweep logo" width="112">
+</p>
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-8A2BE2)](https://github.com/sponsors/AkuchiS)
-[![License](https://img.shields.io/github/license/AkuchiS/proxsweep?color=8A2BE2)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/AkuchiS/proxsweep?color=8A2BE2)](https://github.com/AkuchiS/proxsweep/commits)
-[![Stars](https://img.shields.io/github/stars/AkuchiS/proxsweep?color=8A2BE2)](https://github.com/AkuchiS/proxsweep/stargazers)
+<h1 align="center">ProxSweep</h1>
 
-Automated update script for Proxmox VE homelab stacks. Runs on the Proxmox host and updates the host, every LXC container, every VM with the QEMU guest agent, and the Docker containers inside any of them — then checks everything came back up.
+<p align="center"><b>One command updates your whole Proxmox homelab — the host, every LXC, VMs and Docker — then checks everything came back.</b></p>
+
+<p align="center">
+<a href="https://github.com/sponsors/AkuchiS"><img alt="Sponsor" src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-8A2BE2"></a>
+<a href="https://github.com/AkuchiS/ProxSweep/releases"><img alt="Release" src="https://img.shields.io/github/v/release/AkuchiS/ProxSweep?color=8A2BE2"></a>
+<a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/AkuchiS/ProxSweep?color=8A2BE2"></a>
+<a href="https://github.com/AkuchiS/ProxSweep/commits"><img alt="Last commit" src="https://img.shields.io/github/last-commit/AkuchiS/ProxSweep?color=8A2BE2"></a>
+<a href="https://github.com/AkuchiS/ProxSweep/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/AkuchiS/ProxSweep?color=8A2BE2"></a>
+</p>
+
+<p align="center"><a href="https://github.akuchis.com/ProxSweep/">Website</a> · <a href="#installation">Install</a> · <a href="#settings">Settings</a> · <a href="CHANGELOG.md">Changelog</a></p>
+
+---
+
+A single Bash script for Proxmox VE homelabs. It runs on the Proxmox host and updates the host, every LXC container, every VM with the QEMU guest agent, and the Docker containers inside any of them — snapshotting first, then checking everything came back up.
 
 ## What it does
 
@@ -27,7 +40,10 @@ Guests that run Docker get their OS packages updated as well — Docker itself i
 - **Docker containers come back.** Containers that were running before the update and are stopped afterwards are started again. Unhealthy or restart-looping containers are flagged.
 - **Persistent restart settings are checked.** Running guests without *Start at boot* (`onboot`) and Docker containers without a restart policy (`unless-stopped`/`always`) are flagged, because they stay down after a reboot. `FIX_ONBOOT=1` and `FIX_RESTART_POLICY=1` fix them.
 - **Honest results.** A package source that fails to refresh (an expired or rejected signing key, say) is flagged instead of reported as up to date. Failures (including Watchtower errors) are reported as errors, and the script exits `1` if anything failed — so cron mail or monitoring can catch it.
-- **Disk-space guard.** A guest with less than 1 GB free is not upgraded, so a nearly full disk can't leave it half-upgraded. It's reported as an error so you notice.
+- **Disk-space guard.** A guest with less than 1 GB free is not upgraded, so a nearly full disk can't leave it half-upgraded. That's an error when updates were held back, and a warning when nothing was due.
+- **Busy or stuck package locks.** apt waits up to `APT_LOCK_WAIT` seconds for another package run to finish. A lock held for hours is reported as stuck, naming the process, instead of failing cryptically.
+- **Service checks.** List your web apps in `SERVICE_CHECKS`; each must answer (HTTP 2xx/3xx) after the run, or it's an error.
+- **Inventory.** New, removed, renamed and stopped/started guests since the last run are reported.
 - **One run at a time.** A lock stops overlapping cron runs.
 
 ## Requirements
@@ -40,16 +56,23 @@ Guests that run Docker get their OS packages updated as well — Docker itself i
 ## Installation
 
 ```bash
-curl -o /usr/local/bin/pve_stack_updater.sh \
+curl -fsSL -o /usr/local/bin/pve_stack_updater.sh \
   https://raw.githubusercontent.com/AkuchiS/ProxSweep/main/pve_stack_updater.sh
 chmod +x /usr/local/bin/pve_stack_updater.sh
+pve_stack_updater.sh --check
 ```
+
+`--check` confirms the host has everything ProxSweep needs and whether it's scheduled.
 
 ## Usage
 
+```
+pve_stack_updater.sh [--dry-run] [--check] [--config FILE] [--version] [--help]
+```
+
 Try it first without changing anything:
 ```bash
-DRY_RUN=1 /usr/local/bin/pve_stack_updater.sh
+/usr/local/bin/pve_stack_updater.sh --dry-run
 ```
 
 Run for real:
@@ -86,8 +109,22 @@ Put any of these in `/etc/proxsweep.conf` (plain `NAME=value` lines; survives sc
 | `FIX_RESTART_POLICY` | `0` | Set `unless-stopped` on non-compose containers that have no restart policy |
 | `FIX_ONBOOT` | `0` | Turn on *Start at boot* for running guests without it |
 | `MIN_FREE_MB` | `1024` | Don't upgrade a guest with less free space than this on `/` (reported as an error) |
+| `SERVICE_CHECKS` | *(none)* | Web pages that must respond after the run, as `Name=URL` (see below) |
+| `APT_LOCK_WAIT` | `600` | Seconds apt waits for another package run to finish |
+| `STATE_DIR` | `/var/lib/proxsweep` | Where the guest inventory is kept |
 | `SKIP_IDS` | `600` | Guest IDs to skip |
 | `DRY_RUN` | `0` | Report only |
+
+Example `/etc/proxsweep.conf`:
+
+```bash
+SKIP_IDS="600"
+FIX_ONBOOT=1
+SERVICE_CHECKS=(
+  "Plex=http://10.0.0.10:32400/web"
+  "Sonarr=http://10.0.0.11:8989"
+)
+```
 
 ## Skipping guests
 
@@ -122,7 +159,20 @@ Logs are written to `/var/log/pve_stack_updater/YYYY-MM-DD.log` (no colour codes
 [2026-11-22 03:03:02]   RESULT: 19 guests checked | 5 had package updates | 2 skipped | 3 warnings | 0 errors
 ```
 
+## Moving from proxmox-stack-maintainer
+
+ProxSweep 1.1 includes everything the old `proxmox-stack-maintainer.sh` did (inventory, service checks, `--dry-run` / `--check` / `--config`) and imports its inventory on the first run. To switch:
+
+```bash
+systemctl disable --now proxmox-stack-maintainer.timer
+# move SERVICE_CHECKS and SKIP_IDS from /etc/proxmox-stack-maintainer/config.env into /etc/proxsweep.conf
+pve_stack_updater.sh --check     # warns if the old timer is still enabled
+```
+
 ## Notes
+
+### Snapshots and bind mounts
+Proxmox can't snapshot a container with a bind mount (for example a NAS share mounted with `mp0: /mnt/...`). ProxSweep warns and updates without a snapshot, or skips the guest if you set `SNAPSHOT_REQUIRED=1`.
 
 ### Watchtower
 The original `containrrr/watchtower` project is no longer maintained, and older builds fail on newer Docker Engine releases with "client version is too old". The script passes the daemon's API version to Watchtower to avoid that, and reports a real error if Watchtower still fails. You can point `WATCHTOWER_IMAGE` at a maintained fork if you prefer. Compose projects don't use Watchtower at all.

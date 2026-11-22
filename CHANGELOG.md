@@ -3,6 +3,9 @@
 Notable changes to this project. Newest first.
 
 ## [1.1.0] - 2026-11-22
+- New logo, refreshed website and README.
+- Absorbs proxmox-stack-maintainer: guest inventory between runs (new, removed, renamed, started/stopped; its old inventory is imported), `SERVICE_CHECKS` web checks after the run, and `--dry-run`, `--check`, `--config`, `--version`, `--help`.
+- apt waits for a busy package lock (`APT_LOCK_WAIT`), and a lock stuck for hours is reported with the process holding it.
 - VMs are now updated through the QEMU guest agent; Alpine (`apk`) and Fedora (`dnf`) guests are supported.
 - Guests running Docker now get their OS packages updated too, Docker included.
 - apt uses `dist-upgrade`, keeps existing config files and repairs interrupted `dpkg` runs, so packages are no longer silently held back or stuck on prompts.

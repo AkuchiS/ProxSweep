@@ -1,27 +1,124 @@
 <!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ProxSweep — one-command Proxmox homelab updater</title>
-<meta name="description" content="One command updates your whole Proxmox homelab — the host, every LXC, and Docker — in a single pass.">
-<meta property="og:title" content="ProxSweep"><meta property="og:description" content="One command updates your whole Proxmox homelab — the host, every LXC, and Docker — in a single pass.">
+<meta name="description" content="One command updates your whole Proxmox homelab — the host, every LXC, VMs and Docker — snapshots first, then checks everything came back.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<meta name="theme-color" content="#0b0710">
+<meta property="og:type" content="website">
+<meta property="og:title" content="ProxSweep">
+<meta property="og:description" content="One command updates your whole Proxmox homelab — the host, every LXC, VMs and Docker — then checks everything came back.">
+<meta property="og:url" content="https://github.akuchis.com/ProxSweep/">
+<meta property="og:image" content="https://github.akuchis.com/ProxSweep/og.png">
+<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
 <style>
-:root{--bg:#0b0710;--card:#161020;--tx:#ece8f3;--mut:#a99fbd;--cy:#8a2be2;--glow:0 0 18px rgba(138,43,226,.55)}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(1100px 560px at 50% -10%,#1c1230,#0b0710);color:var(--tx);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-a{color:#c79bff;text-decoration:none}a:hover{text-decoration:underline}
-.wrap{max-width:760px;margin:0 auto;padding:0 22px}
-header{text-align:center;padding:72px 0 30px}
-h1{font-size:42px;margin:0 0 10px;letter-spacing:.5px}h1 b{color:var(--cy);text-shadow:var(--glow)}
-.tag{font-size:19px;color:var(--mut);max-width:600px;margin:0 auto 26px}
+:root{--bg:#0b0710;--card:#140e1f;--line:#251a38;--tx:#ece8f3;--mut:#a99fbd;--cy:#8a2be2;--hi:#c79bff;--glow:0 0 18px rgba(138,43,226,.55)}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1100px 560px at 50% -10%,#1c1230,var(--bg));background-color:var(--bg);color:var(--tx);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--hi);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:880px;margin:0 auto;padding:0 16px}
+header{text-align:center;padding:64px 0 34px}
+.logo{width:96px;height:96px;filter:drop-shadow(0 8px 28px rgba(138,43,226,.45))}
+h1{font-size:44px;margin:14px 0 8px;letter-spacing:.3px}
+.tag{font-size:19px;color:var(--mut);max-width:620px;margin:0 auto 22px}
+.pill{display:inline-block;font-size:13px;color:var(--hi);border:1px solid #3a2a55;border-radius:999px;padding:2px 12px;margin-bottom:22px}
 .btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
-.btn{display:inline-block;padding:12px 22px;border-radius:11px;font-weight:600;border:1px solid #3a2a55}
+.btn{display:inline-block;padding:11px 20px;border-radius:11px;font-weight:600;border:1px solid #3a2a55}
+.btn:hover{text-decoration:none;filter:brightness(1.12)}
 .btn.primary{background:linear-gradient(180deg,#9b3bf0,#7a23d6);color:#fff;border-color:#9b3bf0;box-shadow:var(--glow)}
 .btn.ghost{background:#160f24;color:var(--tx)}
-section{padding:30px 0;border-top:1px solid #1d1530}h2{font-size:22px;margin:0 0 12px}
-p{color:var(--mut)}footer{text-align:center;color:var(--mut);padding:40px 0 60px;font-size:14px}
+section{padding:34px 0;border-top:1px solid var(--line)}
+h2{font-size:23px;margin:0 0 6px}
+.lead{color:var(--mut);margin:0 0 18px}
+p{color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+.card h3{font-size:16px;margin:0 0 4px}
+.card p{margin:0;font-size:15px}
+pre{background:#0f0a18;border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow-x:auto;font:13.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#e2dcef;margin:8px 0 12px}
+.c{color:#7d7392}.ok{color:#7ee2a8}.wr{color:#ffd479}.er{color:#ff8f8f}
+code{background:#160f24;border:1px solid #2a1f3d;border-radius:6px;padding:1px 6px;font-size:14px;color:var(--tx)}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0}
+.steps li{counter-increment:s;margin:0 0 14px;padding-left:38px;position:relative;color:var(--mut)}
+.steps li::before{content:counter(s);position:absolute;left:0;top:0;width:26px;height:26px;border-radius:50%;background:#2a1846;color:var(--hi);font-weight:700;font-size:14px;display:grid;place-items:center}
+.steps li b{color:var(--tx)}
+footer{text-align:center;color:var(--mut);padding:36px 0 56px;font-size:14px;border-top:1px solid var(--line)}
+@media (max-width:520px){h1{font-size:36px}.tag{font-size:17px}header{padding-top:44px}}
 </style></head><body><div class="wrap">
-<header><h1><b>ProxSweep</b></h1><p class="tag">One command updates your whole Proxmox homelab — the host, every LXC, and Docker — in a single pass.</p>
-<div class="btns"><a class="btn primary" href="https://github.com/AkuchiS/proxsweep">View on GitHub</a>
-<a class="btn ghost" href="https://github.com/sponsors/AkuchiS">Sponsor</a></div></header>
-<section><h2>What it does</h2><p>Stop SSH-ing into each container. ProxSweep runs one script that updates the Proxmox host, every LXC on it, and Docker — in a single sweep. Built for homelabbers who'd rather run one command than twenty.</p>
-<p>Free and open source (MIT). Full install and usage in the <a href="https://github.com/AkuchiS/proxsweep">README on GitHub</a>.</p></section>
-<footer>MIT · by <a href="https://github.com/AkuchiS">AkuchiS</a> · <a href="https://github.com/AkuchiS/proxsweep">GitHub</a> · <a href="https://github.com/sponsors/AkuchiS">Sponsor the work</a></footer>
+
+<header>
+  <img class="logo" src="logo.svg" alt="ProxSweep logo">
+  <h1>ProxSweep</h1>
+  <p class="tag">One command updates your whole Proxmox homelab — the host, every LXC, VMs and Docker — then checks everything came back.</p>
+  <span class="pill">v1.1.0 · MIT · single Bash script</span>
+  <div class="btns">
+    <a class="btn primary" href="#start">Quick start</a>
+    <a class="btn ghost" href="https://github.com/AkuchiS/ProxSweep">View on GitHub</a>
+    <a class="btn ghost" href="https://github.com/sponsors/AkuchiS">Sponsor</a>
+  </div>
+</header>
+
+<section>
+  <h2>What it does</h2>
+  <p class="lead">Stop SSH-ing into each container. ProxSweep runs on the Proxmox host and sweeps the whole stack in one pass.</p>
+  <div class="grid">
+    <div class="card"><h3>Host</h3><p>Debian updates applied; Proxmox and kernel packages listed for you to install with a planned reboot.</p></div>
+    <div class="card"><h3>LXC containers</h3><p>apt, apk, dnf and opkg detected automatically — including the OS of containers that run Docker.</p></div>
+    <div class="card"><h3>VMs</h3><p>Updated through the QEMU guest agent. No SSH keys to manage.</p></div>
+    <div class="card"><h3>Docker</h3><p>Compose stacks via <code>pull</code> + <code>up -d</code>, so containers behind a VPN container are recreated together. Watchtower for the rest.</p></div>
+  </div>
+</section>
+
+<section>
+  <h2>Safe by default</h2>
+  <p class="lead">Built after real-world breakages: half-finished upgrades, containers that never came back, and failures logged as “OK”.</p>
+  <div class="grid">
+    <div class="card"><h3>Snapshot first</h3><p>Each guest is snapshotted before it changes. The log prints the exact rollback command.</p></div>
+    <div class="card"><h3>Restarts that stick</h3><p>Containers running old code are restarted and checked. Docker containers that stopped are started again.</p></div>
+    <div class="card"><h3>Persistence checks</h3><p>Flags guests without <i>Start at boot</i> and containers without a <code>restart</code> policy — and can fix them.</p></div>
+    <div class="card"><h3>Guards</h3><p>Skips guests that are low on disk, waits for busy package locks, and reports a stuck one.</p></div>
+    <div class="card"><h3>Service checks</h3><p>After the run, your web apps must answer — or it's an error.</p></div>
+    <div class="card"><h3>Inventory</h3><p>Reports new, removed, renamed and stopped guests since the last run.</p></div>
+  </div>
+</section>
+
+<section id="start">
+  <h2>Quick start</h2>
+  <p class="lead">On the Proxmox host, as root.</p>
+  <ol class="steps">
+    <li><b>Install</b>
+<pre>curl -fsSL -o /usr/local/bin/pve_stack_updater.sh \
+  https://raw.githubusercontent.com/AkuchiS/ProxSweep/main/pve_stack_updater.sh
+chmod +x /usr/local/bin/pve_stack_updater.sh</pre></li>
+    <li><b>Check and preview</b> — nothing is changed.
+<pre>pve_stack_updater.sh --check
+pve_stack_updater.sh --dry-run</pre></li>
+    <li><b>Schedule it nightly</b>
+<pre>echo '0 3 * * * root /usr/local/bin/pve_stack_updater.sh >> /var/log/pve_stack_updater/cron.log 2>&amp;1' \
+  > /etc/cron.d/proxsweep</pre></li>
+  </ol>
+  <p>Settings live in <code>/etc/proxsweep.conf</code> and survive updates. Full options are in the <a href="https://github.com/AkuchiS/ProxSweep#settings">README</a>.</p>
+</section>
+
+<section>
+  <h2>What a run looks like</h2>
+<pre><span class="c">===  [140] prismarr (LXC)</span>
+<span class="ok">[ OK]</span> snapshot proxsweep_20261122_141710 taken (undo with: pct rollback 140 …)
+<span class="ok">[ OK]</span> packages upgraded (apt-get)
+<span class="ok">[ OK]</span> compose 'prismarr': 2 container(s) recreated
+[---] restarting: 13 process(es) still running old code
+<span class="ok">[ OK]</span> restarted and running again
+<span class="ok">[ OK]</span> all running Docker containers came back and have a restart policy
+<span class="c">===  [121] byparr (LXC)</span>
+<span class="er">[ERR]</span> only 407 MB free on /, so packages and Docker images were not updated
+<span class="c">===  SERVICE CHECKS</span>
+<span class="ok">[ OK]</span> Prismarr — responding (HTTP 302)
+  RESULT: 19 guests checked | 4 had package updates | 2 skipped | <span class="wr">9 warnings</span> | <span class="er">1 ERROR</span></pre>
+  <p>Real output from a 20-container media server. Errors make the script exit with code 1, so cron mail or monitoring catches them.</p>
+</section>
+
+<footer>
+  <img src="logo.svg" alt="" width="28" height="28" style="vertical-align:middle;margin-right:6px">
+  MIT · by <a href="https://github.com/AkuchiS">AkuchiS</a> · <a href="https://github.com/AkuchiS/ProxSweep">GitHub</a> · <a href="https://github.com/AkuchiS/ProxSweep/blob/main/CHANGELOG.md">Changelog</a> · <a href="https://github.com/sponsors/AkuchiS">Sponsor the work</a>
+</footer>
 </div></body></html>
