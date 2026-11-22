@@ -42,6 +42,7 @@ Guests that run Docker get their OS packages updated as well — Docker itself i
 - **Honest results.** A package source that fails to refresh (an expired or rejected signing key, say) is flagged instead of reported as up to date. Failures (including Watchtower errors) are reported as errors, and the script exits `1` if anything failed — so cron mail or monitoring can catch it.
 - **Disk-space guard.** A guest with less than 1 GB free is not upgraded, so a nearly full disk can't leave it half-upgraded. That's an error when updates were held back, and a warning when nothing was due.
 - **Busy or stuck package locks.** apt waits up to `APT_LOCK_WAIT` seconds for another package run to finish. A lock held for hours is reported as stuck, naming the process, instead of failing cryptically.
+- **Guest health.** Docker's own "healthy" only means the app answers. ProxSweep also checks each guest's disk (warning at 85%, error at 95%), swap (warning at 90%), and processes killed for running out of memory since the last run, so a slow leak or a filling disk shows up before it breaks something.
 - **Service checks.** List your web apps in `SERVICE_CHECKS`; each must answer (HTTP 2xx/3xx) after the run, or it's an error.
 - **Inventory.** New, removed, renamed and stopped/started guests since the last run are reported.
 - **One run at a time.** A lock stops overlapping cron runs.
@@ -109,6 +110,9 @@ Put any of these in `/etc/proxsweep.conf` (plain `NAME=value` lines; survives sc
 | `FIX_RESTART_POLICY` | `0` | Set `unless-stopped` on non-compose containers that have no restart policy |
 | `FIX_ONBOOT` | `0` | Turn on *Start at boot* for running guests without it |
 | `MIN_FREE_MB` | `1024` | Don't upgrade a guest with less free space than this on `/` (reported as an error) |
+| `HEALTH_CHECKS` | `1` | Check disk, swap and out-of-memory kills per guest |
+| `DISK_WARN_PCT` / `DISK_ERR_PCT` | `85` / `95` | Disk use (%) that triggers a warning / an error |
+| `SWAP_WARN_PCT` | `90` | Swap use (%) that triggers a warning |
 | `SERVICE_CHECKS` | *(none)* | Web pages that must respond after the run, as `Name=URL` (see below) |
 | `APT_LOCK_WAIT` | `600` | Seconds apt waits for another package run to finish |
 | `STATE_DIR` | `/var/lib/proxsweep` | Where the guest inventory is kept |

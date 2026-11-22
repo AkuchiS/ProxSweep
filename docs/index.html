@@ -50,7 +50,7 @@ footer{text-align:center;color:var(--mut);padding:36px 0 56px;font-size:14px;bor
   <img class="logo" src="logo.svg" alt="ProxSweep logo">
   <h1>ProxSweep</h1>
   <p class="tag">One command updates your whole Proxmox homelab — the host, every LXC, VMs and Docker — then checks everything came back.</p>
-  <span class="pill">v1.1.1 · MIT · single Bash script</span>
+  <span class="pill">v1.2.0 · MIT · single Bash script</span>
   <div class="btns">
     <a class="btn primary" href="#start">Quick start</a>
     <a class="btn ghost" href="https://github.com/AkuchiS/ProxSweep">View on GitHub</a>
@@ -77,6 +77,7 @@ footer{text-align:center;color:var(--mut);padding:36px 0 56px;font-size:14px;bor
     <div class="card"><h3>Restarts that stick</h3><p>Containers running old code are restarted and checked. Docker containers that stopped are started again.</p></div>
     <div class="card"><h3>Persistence checks</h3><p>Flags guests without <i>Start at boot</i> and containers without a <code>restart</code> policy — and can fix them.</p></div>
     <div class="card"><h3>Guards</h3><p>Skips guests that are low on disk, waits for busy package locks, and reports a stuck one.</p></div>
+    <div class="card"><h3>Health checks</h3><p>Flags full disks, full swap and processes killed for lack of memory — the slow problems Docker's “healthy” never shows.</p></div>
     <div class="card"><h3>Service checks</h3><p>After the run, your web apps must answer — or it's an error.</p></div>
     <div class="card"><h3>Inventory</h3><p>Reports new, removed, renamed and stopped guests since the last run.</p></div>
   </div>
