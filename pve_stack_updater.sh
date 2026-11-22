@@ -58,8 +58,8 @@ else
     RED=''; GRN=''; YLW=''; BLU=''; NC=''
 fi
 
-TOTAL_UPDATED=0; TOTAL_SKIPPED=0; TOTAL_ERRORS=0; TOTAL_WARNINGS=0
-GUEST_ERR=0; SNAPPED=0
+TOTAL_CHECKED=0; TOTAL_WITH_UPDATES=0; TOTAL_SKIPPED=0; TOTAL_ERRORS=0; TOTAL_WARNINGS=0
+SNAPPED=0
 
 log() {
     local line
@@ -70,7 +70,7 @@ log() {
 ok()    { log "${GRN}[ OK] $1${NC}"; }
 info()  { log "[---] $1"; }
 warn()  { log "${YLW}[WRN] $1${NC}"; TOTAL_WARNINGS=$((TOTAL_WARNINGS + 1)); }
-err()   { log "${RED}[ERR] $1${NC}"; TOTAL_ERRORS=$((TOTAL_ERRORS + 1)); GUEST_ERR=1; }
+err()   { log "${RED}[ERR] $1${NC}"; TOTAL_ERRORS=$((TOTAL_ERRORS + 1)); }
 title() { log ""; log "${BLU}===  $1${NC}"; }
 
 # Value of a "PS:KEY=value" line in guest output
@@ -190,6 +190,7 @@ apt-get)
         echo "PS:ERR apt-get update failed"; exit 1
     fi
     printf '%s\n' "$out" | grep -E '^(W|E):' | head -n 5 | sed 's/^/PS:WARN apt: /'
+    printf '%s\n' "$out" | grep -qE '^W: (Failed to fetch|.*signature)|^E: ' && echo "PS:STALEINDEX=1"
     if ! sim=$(apt-get -s "$APT_MODE" 2>&1); then
         printf '%s\n' "$sim" | tail -n 5
         echo "PS:ERR apt cannot plan the upgrade (broken packages?)"; exit 1
@@ -383,7 +384,10 @@ for c in $(docker ps --format '{{.Names}}'); do
     fi
     nopol=$((nopol + 1))
 done
-[ "$nopol" -eq 0 ] && echo "PS:OK all running Docker containers came back and have a restart policy"
+if [ "$nopol" -eq 0 ]; then
+    if [ "$DRY_RUN" = 1 ]; then echo "PS:OK all running Docker containers have a restart policy"
+    else echo "PS:OK all running Docker containers came back and have a restart policy"; fi
+fi
 exit 0
 EOF
 
@@ -435,7 +439,7 @@ wait_guest() {
 process_guest() {
     local kind=$1 id=$2 name=$3 P="[$2] $3" tool pm docker before pending changed=0 rc
     tool=pct; [ "$kind" = vm ] && tool=qm
-    GUEST_ERR=0; SNAPPED=0
+    SNAPPED=0
     title "$P ($([ "$kind" = ct ] && echo LXC || echo VM))"
 
     STEP_OUT=$(guest_run "$kind" "$id" "$S_PROBE"); rc=$?
@@ -458,9 +462,13 @@ process_guest() {
     elif run_step "$kind" "$id" "$P" "package check" "$S_PKG_CHECK" "PM=$(q "$pm")"; then
         pending=$(getval PENDING "$STEP_OUT")
         [[ "$pending" =~ ^[0-9]+$ ]] || pending=0
-        if [ "$pending" -eq 0 ]; then
+        if [ "$pending" -eq 0 ] && [ -n "$(getval STALEINDEX "$STEP_OUT")" ]; then
+            warn "$P — no updates found, but a package source failed to refresh (see above), so some packages may be out of date"
+        elif [ "$pending" -eq 0 ]; then
             ok "$P — packages up to date ($pm)"
         else
+            TOTAL_WITH_UPDATES=$((TOTAL_WITH_UPDATES + 1))
+            [ -n "$(getval STALEINDEX "$STEP_OUT")" ] && warn "$P — a package source failed to refresh (see above), so some packages may still be out of date"
             info "$P — $pending package(s) to upgrade via $pm: $(getval LIST "$STEP_OUT")"
             if [ "$DRY_RUN" = 1 ]; then
                 info "$P — DRY RUN: not upgrading"
@@ -508,7 +516,7 @@ process_guest() {
         run_step "$kind" "$id" "$P" "Docker check" "$S_DOCKER_VERIFY" "BEFORE=$(q "$before")"
     fi
 
-    if [ "$GUEST_ERR" = 0 ]; then TOTAL_UPDATED=$((TOTAL_UPDATED + 1)); fi
+    TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
 }
 
 # Decide whether a guest is processed, then process it
@@ -590,7 +598,7 @@ host_update() {
         if [ "$DRY_RUN" = 1 ]; then info "HOST — DRY RUN: not upgrading"; return; fi
         out=$(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade 2>&1 </dev/null); rc=$?
         relay "HOST —" "$(tail -n 15 <<<"$out")"
-        if [ $rc -eq 0 ]; then ok "HOST — upgraded ${#all[@]} package(s)"; TOTAL_UPDATED=$((TOTAL_UPDATED + 1))
+        if [ $rc -eq 0 ]; then ok "HOST — upgraded ${#all[@]} package(s)"
         else err "HOST — upgrade failed (exit $rc)"; fi
         return
     fi
@@ -601,19 +609,33 @@ host_update() {
         warn "HOST — install them with 'apt full-upgrade' when you can reboot, or set HOST_MODE=full"
     fi
     if [ ${#other[@]} -eq 0 ]; then ok "HOST — Debian packages up to date"; return; fi
-    info "HOST — ${#other[@]} Debian package(s) to upgrade: ${other[*]}"
-    local pulls=()
-    while IFS= read -r p; do is_pve_pkg "$p" && pulls+=("$p"); done < <(
-        apt-get -s install --only-upgrade "${other[@]}" 2>/dev/null </dev/null | awk '/^Inst /{print $2}')
-    if [ ${#pulls[@]} -gt 0 ]; then
-        warn "HOST — these upgrades would also change Proxmox packages (${pulls[*]}), so they were left for a manual 'apt full-upgrade'"
+    # Keep only packages whose upgrade doesn't drag in Proxmox packages
+    local safe=() held=()
+    for p in "${other[@]}"; do
+        if pulls_pve "$p"; then held+=("$p"); else safe+=("$p"); fi
+    done
+    if [ ${#held[@]} -gt 0 ]; then
+        warn "HOST — ${#held[@]} Debian package(s) left for 'apt full-upgrade' because they also need Proxmox packages: ${held[*]}"
+    fi
+    if [ ${#safe[@]} -gt 0 ] && pulls_pve "${safe[@]}"; then
+        warn "HOST — together the remaining upgrades would change Proxmox packages, so none were installed; run 'apt full-upgrade' when you can"
         return
     fi
+    if [ ${#safe[@]} -eq 0 ]; then return; fi
+    info "HOST — ${#safe[@]} Debian package(s) to upgrade: ${safe[*]}"
     if [ "$DRY_RUN" = 1 ]; then info "HOST — DRY RUN: not upgrading"; return; fi
-    out=$(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${other[@]}" 2>&1 </dev/null); rc=$?
+    out=$(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${safe[@]}" 2>&1 </dev/null); rc=$?
     relay "HOST —" "$(tail -n 15 <<<"$out")"
-    if [ $rc -eq 0 ]; then ok "HOST — upgraded ${#other[@]} Debian package(s)"; TOTAL_UPDATED=$((TOTAL_UPDATED + 1))
+    if [ $rc -eq 0 ]; then ok "HOST — upgraded ${#safe[@]} Debian package(s)"
     else err "HOST — upgrade failed (exit $rc)"; fi
+}
+
+# True if upgrading the given packages would also install or upgrade a Proxmox package
+pulls_pve() {
+    local p
+    while IFS= read -r p; do is_pve_pkg "$p" && return 0; done < <(
+        apt-get -s install --only-upgrade "$@" 2>/dev/null </dev/null | awk '/^Inst /{print $2}')
+    return 1
 }
 
 host_reboot_check() {
@@ -655,10 +677,12 @@ host_reboot_check
 
 log ""
 log "============================================================"
+if [ "$DRY_RUN" = 1 ]; then UPD_LABEL="with package updates waiting"; else UPD_LABEL="had package updates"; fi
+SUMMARY="$TOTAL_CHECKED guests checked | $TOTAL_WITH_UPDATES $UPD_LABEL | $TOTAL_SKIPPED skipped | $TOTAL_WARNINGS warnings"
 if [ "$TOTAL_ERRORS" -gt 0 ]; then
-    log "${RED}  RESULT: $TOTAL_UPDATED updated | $TOTAL_SKIPPED skipped | $TOTAL_WARNINGS warnings | $TOTAL_ERRORS ERROR(S)${NC}"
+    log "${RED}  RESULT: $SUMMARY | $TOTAL_ERRORS ERROR(S)${NC}"
 else
-    log "${GRN}  RESULT: $TOTAL_UPDATED updated | $TOTAL_SKIPPED skipped | $TOTAL_WARNINGS warnings | 0 errors${NC}"
+    log "${GRN}  RESULT: $SUMMARY | 0 errors${NC}"
 fi
 log "  Log saved to: $LOG_FILE"
 log "============================================================"

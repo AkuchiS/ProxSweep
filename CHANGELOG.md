@@ -13,6 +13,9 @@ Notable changes to this project. Newest first.
 - Fixed: Watchtower failures were always reported as OK. Real errors are now reported and the script exits 1 if anything failed.
 - Docker containers that stop during an update are started again; missing restart policies and *Start at boot* settings are flagged (optional fixes: `FIX_RESTART_POLICY=1`, `FIX_ONBOOT=1`).
 - Host: Proxmox packages waiting are listed; `HOST_MODE=full` runs the Proxmox-supported dist-upgrade. Running vs installed kernel is checked.
+- Host safe mode installs the Debian updates that don't need Proxmox packages and lists the ones it held back, instead of skipping all of them.
+- A package source that fails to refresh is flagged instead of the guest being reported as up to date.
+- Clearer summary: guests checked and guests with package updates (waiting, in a dry run).
 - Added `DRY_RUN`, `ONLY_IDS`, `/etc/proxsweep.conf`, a run lock and colour-free log files. README install URL and log path corrected.
 
 ## [1.0.0] - 2026-06-28

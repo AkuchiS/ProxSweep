@@ -11,7 +11,7 @@ Automated update script for Proxmox VE homelab stacks. Runs on the Proxmox host 
 
 | Target | Method | Details |
 |--------|--------|---------|
-| Proxmox host | `apt` | Safe mode (default): Debian packages only. Proxmox/kernel packages are listed, not installed. `HOST_MODE=full` runs `apt dist-upgrade`, the Proxmox-supported way |
+| Proxmox host | `apt` | Safe mode (default): Debian packages only, minus any whose upgrade would also change Proxmox packages. Proxmox/kernel packages are listed, not installed. `HOST_MODE=full` runs `apt dist-upgrade`, the Proxmox-supported way |
 | LXC and VMs (Debian/Ubuntu) | `apt-get dist-upgrade` | Non-interactive, keeps your existing config files, finishes interrupted `dpkg` runs first |
 | LXC and VMs (Alpine / Fedora) | `apk` / `dnf` | Auto-detected |
 | LXC (opkg-based) | `opkg` | OpenWRT, Entware and other embedded Linux |
@@ -26,7 +26,7 @@ Guests that run Docker get their OS packages updated as well — Docker itself i
 - **Restarts when needed.** After a package upgrade the script looks for processes still running deleted (old) libraries, the reboot-required flag, or a newer kernel. LXC containers are restarted and checked; VMs are reported (or restarted with `REBOOT_VMS=1`). The host is never rebooted.
 - **Docker containers come back.** Containers that were running before the update and are stopped afterwards are started again. Unhealthy or restart-looping containers are flagged.
 - **Persistent restart settings are checked.** Running guests without *Start at boot* (`onboot`) and Docker containers without a restart policy (`unless-stopped`/`always`) are flagged, because they stay down after a reboot. `FIX_ONBOOT=1` and `FIX_RESTART_POLICY=1` fix them.
-- **Honest results.** Failures (including Watchtower errors) are reported as errors, and the script exits `1` if anything failed — so cron mail or monitoring can catch it.
+- **Honest results.** A package source that fails to refresh (an expired or rejected signing key, say) is flagged instead of reported as up to date. Failures (including Watchtower errors) are reported as errors, and the script exits `1` if anything failed — so cron mail or monitoring can catch it.
 - **One run at a time.** A lock stops overlapping cron runs.
 
 ## Requirements
@@ -117,7 +117,7 @@ Logs are written to `/var/log/pve_stack_updater/YYYY-MM-DD.log` (no colour codes
 [2026-11-22 03:01:31] [WRN] [102] arr — qbit stopped during the update, started it again
 [2026-11-22 03:01:31] [WRN] [102] arr — portainer has no restart policy, so it stays down after a reboot or Docker restart
 ...
-[2026-11-22 03:03:02]   RESULT: 5 updated | 2 skipped | 3 warnings | 0 errors
+[2026-11-22 03:03:02]   RESULT: 19 guests checked | 5 had package updates | 2 skipped | 3 warnings | 0 errors
 ```
 
 ## Notes
