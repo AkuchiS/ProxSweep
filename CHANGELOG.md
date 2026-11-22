@@ -2,6 +2,9 @@
 
 Notable changes to this project. Newest first.
 
+## [1.1.1] - 2026-11-22
+- Fixed: compose services with both `image:` and `build:` were skipped when pulling, so they never updated. They are now pulled normally; skipping build-only services is a fallback with a warning.
+
 ## [1.1.0] - 2026-11-22
 - New logo, refreshed website and README.
 - Absorbs proxmox-stack-maintainer: guest inventory between runs (new, removed, renamed, started/stopped; its old inventory is imported), `SERVICE_CHECKS` web checks after the run, and `--dry-run`, `--check`, `--config`, `--version`, `--help`.

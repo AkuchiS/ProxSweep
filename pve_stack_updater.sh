@@ -15,7 +15,7 @@
 
 set -o pipefail
 
-PROXSWEEP_VERSION="1.1.0"
+PROXSWEEP_VERSION="1.1.1"
 
 usage() {
     cat <<'EOF'
@@ -353,8 +353,10 @@ docker ps --format '{{.Names}}' | sort > "$tmp/before"
 if docker compose version >/dev/null 2>&1; then DC="docker compose"
 elif command -v docker-compose >/dev/null 2>&1; then DC="docker-compose"
 else DC=""; fi
-PULLFLAGS="--quiet"
-[ -n "$DC" ] && $DC pull --help 2>/dev/null | grep -q -- '--ignore-buildable' && PULLFLAGS="--quiet --ignore-buildable"
+# Services with both image: and build: must still be pulled, so --ignore-buildable
+# is only a fallback for projects whose build-only services can't be pulled.
+IGNB=""
+[ -n "$DC" ] && $DC pull --help 2>/dev/null | grep -q -- '--ignore-buildable' && IGNB="--ignore-buildable"
 
 # Compose projects: pull + "up -d" recreates changed services and anything that
 # depends on them (e.g. containers sharing a VPN container's network).
@@ -384,9 +386,13 @@ while IFS='|' read -r proj wd files; do
     if [ "$DRY_RUN" = 1 ]; then
         echo "PS:INFO compose '$proj': would pull and recreate changed services: $services"; continue
     fi
-    if ! out=$(cd "$wd" && $DC -p "$proj" "$@" pull $PULLFLAGS $services 2>&1); then
-        printf '%s\n' "$out" | tail -n 5
-        echo "PS:ERR compose '$proj': pull failed"; fail=1; continue
+    if ! out=$(cd "$wd" && $DC -p "$proj" "$@" pull --quiet $services 2>&1); then
+        if [ -n "$IGNB" ] && out2=$(cd "$wd" && $DC -p "$proj" "$@" pull --quiet $IGNB $services 2>&1); then
+            echo "PS:WARN compose '$proj': some services can't be pulled (built locally?), so only the others were updated"
+        else
+            printf '%s\n' "$out" | tail -n 5
+            echo "PS:ERR compose '$proj': pull failed"; fail=1; continue
+        fi
     fi
     if ! out=$(cd "$wd" && $DC -p "$proj" "$@" up -d $services 2>&1); then
         printf '%s\n' "$out" | tail -n 5
