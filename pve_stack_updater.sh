@@ -15,7 +15,7 @@
 
 set -o pipefail
 
-PROXSWEEP_VERSION="1.1.1"
+PROXSWEEP_VERSION="1.2.0"
 
 usage() {
     cat <<'EOF'
@@ -86,6 +86,11 @@ CONFIG_FILE="${CONFIG_FILE:-/etc/proxsweep.conf}"
 : "${STATE_DIR:=/var/lib/proxsweep}"   # guest inventory kept between runs
 : "${SERVICE_CHECK_TIMEOUT:=8}"        # seconds per web check attempt
 : "${SERVICE_CHECK_TRIES:=3}"          # attempts (10 s apart) before a check fails
+: "${HEALTH_CHECKS:=1}"                # check disk, swap and out-of-memory kills per guest
+: "${DISK_WARN_PCT:=85}"               # warn when a guest's / is this full (%)
+: "${DISK_ERR_PCT:=95}"                # error when a guest's / is this full (%)
+: "${SWAP_WARN_PCT:=90}"               # warn when a guest's swap is this full (%)
+: "${CGROUP_LXC_ROOT:=/sys/fs/cgroup/lxc}"  # where Proxmox keeps container memory counters
 # SERVICE_CHECKS: web pages that must respond after the run, as Name=URL.
 #   In /etc/proxsweep.conf:  SERVICE_CHECKS=("Plex=http://10.0.0.5:32400/web" "Sonarr=http://10.0.0.6:8989")
 #   Or a space-separated string in the environment.
@@ -98,6 +103,7 @@ fi
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
 LOCK_FILE="/run/proxsweep.lock"
 INV_FILE="$STATE_DIR/inventory.tsv"
+OOM_FILE="$STATE_DIR/oom_kills.tsv"
 LEGACY_INV_FILE="/var/lib/proxmox-stack-maintainer/inventory.tsv"
 
 # ── --check: report whether this host is ready, then exit ─────────────
@@ -115,6 +121,8 @@ runtime_check() {
     say INFO "log dir: $LOG_DIR"
     say INFO "state dir: $STATE_DIR"
     say INFO "service checks configured: ${#SVC_LIST[@]}"
+    if [ "$HEALTH_CHECKS" = 1 ]; then say INFO "health checks: disk warn ${DISK_WARN_PCT}% / error ${DISK_ERR_PCT}%, swap warn ${SWAP_WARN_PCT}%"
+    else say INFO "health checks: off"; fi
     if grep -qs 'pve_stack_updater' /etc/cron.d/* /var/spool/cron/crontabs/root 2>/dev/null \
         || systemctl list-timers --all --no-pager 2>/dev/null | grep -q proxsweep; then
         say OK "scheduled (cron or systemd timer found)"
@@ -437,6 +445,13 @@ exit $fail
 EOF
 
 # Needs BEFORE (newline-separated container names that were running at the start)
+read -r -d '' S_HEALTH <<'EOF'
+df -Pm / 2>/dev/null | awk 'NR==2{sub("%","",$5); print "PS:DISKSIZE="$2; print "PS:DISKFREE="$4; print "PS:DISKPCT="$5}'
+awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} /^MemTotal:/{m=$2} /^MemAvailable:/{a=$2}
+     END{print "PS:SWAPTOTAL="int(t/1024); print "PS:SWAPUSED="int((t-f)/1024); print "PS:MEMTOTAL="int(m/1024); print "PS:MEMAVAIL="int(a/1024)}' /proc/meminfo 2>/dev/null
+exit 0
+EOF
+
 read -r -d '' S_DOCKER_VERIFY <<'EOF'
 i=0
 while ! docker info >/dev/null 2>&1; do
@@ -621,6 +636,7 @@ process_guest() {
         run_step "$kind" "$id" "$P" "Docker check" "$S_DOCKER_VERIFY" "BEFORE=$(q "$before")"
     fi
 
+    guest_health "$kind" "$id" "$P"
     TOTAL_CHECKED=$((TOTAL_CHECKED + 1))
 }
 
@@ -656,10 +672,12 @@ consider_guest() {
 
     if grep -qw "no-auto-update" <<<"$tags"; then
         info "$P — skipped (tagged no-auto-update)"
+        [ "$kind" = ct ] && guest_health "$kind" "$id" "$P"
         TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)); return
     fi
     if [[ " $SKIP_IDS " == *" $id "* ]]; then
         info "$P — skipped (in SKIP_IDS)"
+        [ "$kind" = ct ] && guest_health "$kind" "$id" "$P"
         TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)); return
     fi
     lock=$(awk '/^lock:/{print $2}' <<<"$cfg")
@@ -755,6 +773,70 @@ service_checks() {
         if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then ok "$name — responding (HTTP $code) at $url"
         else err "$name — not responding (HTTP ${code:-000}) at $url"; fi
     done
+}
+
+# ── HEALTH (disk, swap, out-of-memory kills) ──────────────────────────
+# Docker's own "healthy" only says the app answers. A guest can look healthy
+# while its disk fills, its swap is full or the kernel keeps killing
+# processes for lack of memory, so those are checked separately.
+declare -A OOM_PREV OOM_NOW
+
+oom_load() {
+    local id n
+    [ -f "$OOM_FILE" ] || return 0
+    while read -r id n; do
+        [[ "$id" =~ ^[0-9]+$ ]] && [[ "$n" =~ ^[0-9]+$ ]] && OOM_PREV[$id]=$n
+    done < "$OOM_FILE"
+}
+
+oom_save() {
+    local id tmp
+    [ "$DRY_RUN" = 1 ] && return 0
+    [ ${#OOM_NOW[@]} -gt 0 ] || return 0
+    for id in "${!OOM_NOW[@]}"; do OOM_PREV[$id]=${OOM_NOW[$id]}; done
+    mkdir -p "$STATE_DIR"
+    tmp=$(mktemp "$STATE_DIR/oom.XXXXXX") || return 0
+    for id in "${!OOM_PREV[@]}"; do printf '%s %s\n' "$id" "${OOM_PREV[$id]}"; done | sort -n > "$tmp" && mv "$tmp" "$OOM_FILE"
+}
+
+guest_health() {
+    local kind=$1 id=$2 P=$3 out size free pct st su ma spct="" kills prev new since bad=0
+    [ "$HEALTH_CHECKS" = 1 ] || return 0
+    if ! out=$(guest_run "$kind" "$id" "$S_HEALTH"); then
+        warn "$P — health check could not run"; return
+    fi
+    size=$(getval DISKSIZE "$out"); free=$(getval DISKFREE "$out"); pct=$(getval DISKPCT "$out")
+    st=$(getval SWAPTOTAL "$out"); su=$(getval SWAPUSED "$out"); ma=$(getval MEMAVAIL "$out")
+
+    if [[ "$pct" =~ ^[0-9]+$ ]]; then
+        if [ "$pct" -ge "$DISK_ERR_PCT" ]; then
+            err "$P — disk ${pct}% full (${free} MB free of ${size} MB). Free space or grow the disk"; bad=1
+        elif [ "$pct" -ge "$DISK_WARN_PCT" ]; then
+            warn "$P — disk ${pct}% full (${free} MB free of ${size} MB)"; bad=1
+        fi
+    fi
+    if [[ "$st" =~ ^[0-9]+$ ]] && [[ "$su" =~ ^[0-9]+$ ]] && [ "$st" -gt 0 ]; then
+        spct=$(( su * 100 / st ))
+        if [ "$spct" -ge "$SWAP_WARN_PCT" ]; then
+            warn "$P — swap ${spct}% full (${su} of ${st} MB): it is short of memory, or something is leaking"; bad=1
+        fi
+    fi
+    if [ "$kind" = ct ] && [ -r "$CGROUP_LXC_ROOT/$id/memory.events" ]; then
+        kills=$(awk '$1=="oom_kill"{print $2}' "$CGROUP_LXC_ROOT/$id/memory.events")
+        if [[ "$kills" =~ ^[0-9]+$ ]]; then
+            prev=${OOM_PREV[$id]:-}
+            if [ -z "$prev" ]; then new=$kills; since="since the container started"
+            elif [ "$kills" -lt "$prev" ]; then new=$kills; since="since the container restarted"
+            else new=$(( kills - prev )); since="since the last run"; fi
+            OOM_NOW[$id]=$kills
+            if [ "$new" -gt 0 ]; then
+                warn "$P — $new process(es) killed for running out of memory $since: give it more memory or swap, or restart what is leaking"; bad=1
+            fi
+        fi
+    fi
+    if [ "$bad" = 0 ]; then
+        ok "$P — health: disk ${pct:-?}% used, swap ${spct:-0}% used, ${ma:-?} MB memory available"
+    fi
 }
 
 # ── HOST ──────────────────────────────────────────────────────────────
@@ -866,6 +948,7 @@ log "  Host : $(hostname)    Date : $(date)"
 log "============================================================"
 
 inventory_load
+oom_load
 host_update
 
 mapfile -t CT_IDS < <(pct list 2>/dev/null </dev/null | awk 'NR>1{print $1}')
@@ -880,6 +963,7 @@ fi
 
 service_checks
 inventory_finish
+oom_save
 host_reboot_check
 
 log ""
