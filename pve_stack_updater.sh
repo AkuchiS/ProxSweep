@@ -5,20 +5,54 @@
 #  QEMU guest agent) and the Docker containers running inside any of them.
 #  Run on the Proxmox HOST as root.
 #
-#  Usage:   bash pve_stack_updater.sh
-#           DRY_RUN=1 bash pve_stack_updater.sh          # report only, change nothing
-#           ONLY_IDS="105 110" bash pve_stack_updater.sh # limit to some guests
+#  Usage:   pve_stack_updater.sh [--dry-run] [--check] [--config FILE]
+#           ONLY_IDS="105 110" pve_stack_updater.sh   # limit to some guests
 #  Config:  /etc/proxsweep.conf (optional; plain VAR=value lines, survives
 #           script updates). Settings are listed under SETTINGS below.
 #  Logs:    /var/log/pve_stack_updater/YYYY-MM-DD.log
-#  Exit:    0 = no errors, 1 = at least one error (see log)
+#  Exit:    0 = no errors, 1 = at least one error (see log), 2 = bad option
 # ============================================================
 
 set -o pipefail
 
+PROXSWEEP_VERSION="1.1.0"
+
+usage() {
+    cat <<'EOF'
+ProxSweep — updates a Proxmox host, its containers, VMs and Docker.
+
+Usage:
+  pve_stack_updater.sh [--dry-run] [--check] [--config FILE]
+
+Options:
+  --dry-run       Show what would be updated; change nothing.
+  --check         Check this host has what ProxSweep needs, then exit.
+  --config FILE   Read settings from FILE instead of /etc/proxsweep.conf.
+  --version       Print the version.
+  -h, --help      Show this help.
+
+Settings can also be given as environment variables, e.g. ONLY_IDS="105 110".
+EOF
+}
+
+CHECK_ONLY=0; CLI_DRY_RUN=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dry-run)  CLI_DRY_RUN=1 ;;
+        --check)    CHECK_ONLY=1 ;;
+        --config)   shift; CONFIG_FILE="${1:-}" ;;
+        --config=*) CONFIG_FILE="${1#*=}" ;;
+        --version)  echo "ProxSweep $PROXSWEEP_VERSION"; exit 0 ;;
+        -h|--help)  usage; exit 0 ;;
+        *)          echo "ERROR: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
 CONFIG_FILE="${CONFIG_FILE:-/etc/proxsweep.conf}"
 # shellcheck source=/dev/null
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+[ "$CLI_DRY_RUN" = 1 ] && DRY_RUN=1
 
 # ── SETTINGS (override in /etc/proxsweep.conf or the environment) ──────
 : "${LOG_DIR:=/var/log/pve_stack_updater}"
@@ -47,10 +81,54 @@ CONFIG_FILE="${CONFIG_FILE:-/etc/proxsweep.conf}"
 : "${FIX_ONBOOT:=0}"          # 1 = turn on "Start at boot" for running guests without it
 : "${MIN_FREE_MB:=1024}"       # skip upgrades in a guest with less free space on /
 : "${EXEC_TIMEOUT:=1800}"     # seconds allowed for one step inside a guest
+: "${APT_LOCK_WAIT:=600}"     # seconds apt waits for another package run to finish
 : "${SETTLE_SECONDS:=20}"     # wait before checking Docker containers came back
+: "${STATE_DIR:=/var/lib/proxsweep}"   # guest inventory kept between runs
+: "${SERVICE_CHECK_TIMEOUT:=8}"        # seconds per web check attempt
+: "${SERVICE_CHECK_TRIES:=3}"          # attempts (10 s apart) before a check fails
+# SERVICE_CHECKS: web pages that must respond after the run, as Name=URL.
+#   In /etc/proxsweep.conf:  SERVICE_CHECKS=("Plex=http://10.0.0.5:32400/web" "Sonarr=http://10.0.0.6:8989")
+#   Or a space-separated string in the environment.
+if declare -p SERVICE_CHECKS 2>/dev/null | grep -q '^declare -a'; then
+    SVC_LIST=("${SERVICE_CHECKS[@]}")
+else
+    read -r -a SVC_LIST <<<"${SERVICE_CHECKS:-}"
+fi
 
 LOG_FILE="$LOG_DIR/$(date +%Y-%m-%d).log"
 LOCK_FILE="/run/proxsweep.lock"
+INV_FILE="$STATE_DIR/inventory.tsv"
+LEGACY_INV_FILE="/var/lib/proxmox-stack-maintainer/inventory.tsv"
+
+# ── --check: report whether this host is ready, then exit ─────────────
+runtime_check() {
+    local rc=0 c
+    say() { printf '%-5s %s\n' "$1" "$2"; }
+    echo "ProxSweep $PROXSWEEP_VERSION — host check"
+    if [ "$EUID" -eq 0 ]; then say OK "running as root"; else say FAIL "must run as root"; rc=1; fi
+    for c in pct qm flock timeout perl curl apt-get; do
+        if command -v "$c" >/dev/null 2>&1; then say OK "command found: $c"; else say FAIL "missing command: $c"; rc=1; fi
+    done
+    if perl -MJSON::PP -e 1 2>/dev/null; then say OK "Perl JSON::PP available (needed for VMs)"
+    else say WARN "Perl JSON::PP missing: VMs will not be updated"; fi
+    if [ -f "$CONFIG_FILE" ]; then say OK "config: $CONFIG_FILE"; else say INFO "no config file at $CONFIG_FILE (defaults in use)"; fi
+    say INFO "log dir: $LOG_DIR"
+    say INFO "state dir: $STATE_DIR"
+    say INFO "service checks configured: ${#SVC_LIST[@]}"
+    if grep -qs 'pve_stack_updater' /etc/cron.d/* /var/spool/cron/crontabs/root 2>/dev/null \
+        || systemctl list-timers --all --no-pager 2>/dev/null | grep -q proxsweep; then
+        say OK "scheduled (cron or systemd timer found)"
+    else
+        say WARN "not scheduled: see the README for the nightly cron line"
+    fi
+    if systemctl is-enabled proxmox-stack-maintainer.timer >/dev/null 2>&1; then
+        say WARN "old proxmox-stack-maintainer.timer is still enabled: two updaters would run"
+    fi
+    if (exec 8>"$LOCK_FILE" && flock -n 8) 2>/dev/null; then say OK "no ProxSweep run in progress"
+    else say INFO "a ProxSweep run is in progress"; fi
+    return "$rc"
+}
+if [ "$CHECK_ONLY" = 1 ]; then runtime_check; exit $?; fi
 
 # ── OUTPUT ────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -139,7 +217,8 @@ WATCHTOWER_IMAGE=$(q "$WATCHTOWER_IMAGE")
 DOCKER_PRUNE=$(q "$DOCKER_PRUNE")
 RESTORE_DOCKER=$(q "$RESTORE_DOCKER")
 FIX_RESTART_POLICY=$(q "$FIX_RESTART_POLICY")
-SETTLE_SECONDS=$(q "$SETTLE_SECONDS")"
+SETTLE_SECONDS=$(q "$SETTLE_SECONDS")
+APT_LOCK_WAIT=$(q "$APT_LOCK_WAIT")"
 
 # guest_run <kind> <id> <script> [extra variable lines]
 # The script body is wrapped in { ... } </dev/null so the guest shell reads
@@ -187,7 +266,7 @@ apt-get)
     if [ "$DRY_RUN" != 1 ]; then
         dpkg --configure -a >/dev/null 2>&1 || echo "PS:WARN dpkg --configure -a reported problems"
     fi
-    if ! out=$(apt-get update -q 2>&1); then
+    if ! out=$(apt-get -o DPkg::Lock::Timeout="$APT_LOCK_WAIT" update -q 2>&1); then
         printf '%s\n' "$out" | tail -n 5
         echo "PS:ERR apt-get update failed"; exit 1
     fi
@@ -227,7 +306,7 @@ EOF
 read -r -d '' S_PKG_UPGRADE <<'EOF'
 case "$PM" in
 apt-get)
-    out=$(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$APT_MODE" 2>&1); rc=$? ;;
+    out=$(apt-get -y -q -o DPkg::Lock::Timeout="$APT_LOCK_WAIT" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$APT_MODE" 2>&1); rc=$? ;;
 apk)
     out=$(apk upgrade --no-progress 2>&1); rc=$? ;;
 dnf)
@@ -416,10 +495,10 @@ take_snapshot() {
         return 0
     fi
     if [ "$SNAPSHOT_REQUIRED" = 1 ]; then
-        err "$P — snapshot failed, so this guest was skipped: $(tail -n 1 <<<"$out")"
+        err "$P — no snapshot possible ($(tail -n 1 <<<"$out")), so this guest was skipped (SNAPSHOT_REQUIRED=1)"
         return 1
     fi
-    warn "$P — snapshot failed (storage may not support snapshots), updating without one: $(tail -n 1 <<<"$out")"
+    warn "$P — no snapshot possible ($(tail -n 1 <<<"$out")), updating without one. Containers with bind mounts, or on storage without snapshots, can't be snapshotted"
     return 0
 }
 
@@ -439,7 +518,7 @@ wait_guest() {
 
 # ── ONE GUEST ─────────────────────────────────────────────────────────
 process_guest() {
-    local kind=$1 id=$2 name=$3 P="[$2] $3" tool pm docker before pending changed=0 rc
+    local kind=$1 id=$2 name=$3 P="[$2] $3" tool pm docker before pending=0 changed=0 rc
     tool=pct; [ "$kind" = vm ] && tool=qm
     SNAPPED=0
     title "$P ($([ "$kind" = ct ] && echo LXC || echo VM))"
@@ -463,8 +542,6 @@ process_guest() {
     free=$(getval FREEMB "$STEP_OUT")
     if [ "$pm" != opkg ] && [[ "$free" =~ ^[0-9]+$ ]] && [ "$free" -lt "$MIN_FREE_MB" ]; then
         lowspace=1
-        local msg="$P — only $free MB free on /, below the $MIN_FREE_MB MB needed to upgrade safely, so packages and Docker images are not updated. Free some space or grow the disk"
-        if [ "$DRY_RUN" = 1 ]; then warn "$msg"; else err "$msg"; fi
     fi
 
     # Packages (also for guests that run Docker: their OS and Docker itself need updates too)
@@ -490,6 +567,15 @@ process_guest() {
                 run_step "$kind" "$id" "$P" "package upgrade" "$S_PKG_UPGRADE" "PM=$(q "$pm")"
                 changed=1
             fi
+        fi
+    fi
+
+    if [ "$lowspace" = 1 ]; then
+        if [ "${pending:-0}" -gt 0 ] || { [ "$docker" = 1 ] && [ "$UPDATE_DOCKER" = 1 ]; }; then
+            local msg="$P — only $free MB free on /, below the $MIN_FREE_MB MB needed to upgrade safely, so packages and Docker images were not updated. Free some space or grow the disk"
+            if [ "$DRY_RUN" = 1 ]; then warn "$msg"; else err "$msg"; fi
+        else
+            warn "$P — only $free MB free on / (below $MIN_FREE_MB MB). Nothing was due today, but updates will be held back until space is freed"
         fi
     fi
 
@@ -538,13 +624,16 @@ consider_guest() {
     tool=pct; [ "$kind" = vm ] && tool=qm
     if [ -n "$ONLY_IDS" ] && [[ " $ONLY_IDS " != *" $id "* ]]; then return; fi
     cfg=$($tool config "$id" 2>/dev/null </dev/null)
-    grep -q '^template: 1' <<<"$cfg" && return
     if [ "$kind" = ct ]; then name=$(awk '/^hostname:/{print $2}' <<<"$cfg")
     else name=$(awk '/^name:/{print $2}' <<<"$cfg"); fi
     name=${name:-$kind$id}
     local P="[$id] $name"
-
+    tags=$(awk '/^tags:/{print $2}' <<<"$cfg")
     status=$($tool status "$id" 2>/dev/null </dev/null | awk '{print $2}')
+    grep -q '^template: 1' <<<"$cfg" && status=template
+    inventory_record "$kind" "$id" "$name" "${status:-unknown}" "$tags"
+    [ "$status" = template ] && return
+
     if [ "$status" != running ]; then
         info "$P — skipped (status: ${status:-unknown})"
         TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)); return
@@ -559,7 +648,6 @@ consider_guest() {
         fi
     fi
 
-    tags=$(awk '/^tags:/{print $2}' <<<"$cfg")
     if grep -qw "no-auto-update" <<<"$tags"; then
         info "$P — skipped (tagged no-auto-update)"
         TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)); return
@@ -583,9 +671,105 @@ consider_guest() {
     process_guest "$kind" "$id" "$name"
 }
 
+# ── INVENTORY (guests seen between runs) ──────────────────────────────
+# One line per guest in $STATE_DIR/inventory.tsv:
+#   type  id  name  status  tags  first-seen  last-seen
+# The format matches the old proxmox-stack-maintainer inventory, which is
+# imported on the first run so existing guests aren't reported as new.
+declare -A INV_NAME INV_STATUS INV_FIRST INV_LAST INV_SEEN
+INV_LINES=(); INV_HAD_PREV=0; INV_IMPORTED=0
+
+inventory_load() {
+    local src="$INV_FILE" type id name status tags first last
+    if [ ! -f "$src" ] && [ -f "$LEGACY_INV_FILE" ]; then src=$LEGACY_INV_FILE; INV_IMPORTED=1; fi
+    [ -f "$src" ] || return 0
+    INV_HAD_PREV=1
+    local line
+    while IFS= read -r line; do
+        # Tabs count as whitespace to read(), so empty fields would collapse; split on \x1f instead
+        IFS=$'\x1f' read -r type id name status tags first last <<<"${line//$'\t'/$'\x1f'}"
+        [ -n "$type" ] && [ -n "$id" ] || continue
+        INV_NAME[$type:$id]=$name; INV_STATUS[$type:$id]=$status
+        INV_FIRST[$type:$id]=$first; INV_LAST[$type:$id]=$last
+    done < "$src"
+}
+
+inventory_record() {
+    local kind=$1 id=$2 name=$3 status=$4 tags=$5 type now first label k
+    type=lxc; label=Container
+    [ "$kind" = vm ] && { type=vm; label=VM; }
+    k="$type:$id"; now=$(date '+%Y-%m-%d %H:%M:%S')
+    name=${name//$'\t'/ }; tags=${tags//$'\t'/ }
+    if [ -z "${INV_NAME[$k]+set}" ]; then
+        first=$now
+        [ "$INV_HAD_PREV" = 1 ] && info "NEW $label: [$id] $name (status: $status)"
+    else
+        first=${INV_FIRST[$k]}
+        [ "${INV_NAME[$k]}" != "$name" ] && info "$label renamed: [$id] ${INV_NAME[$k]} → $name"
+        [ "${INV_STATUS[$k]}" != "$status" ] && info "$label status changed: [$id] $name (${INV_STATUS[$k]} → $status)"
+    fi
+    INV_SEEN[$k]=1
+    INV_LINES+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' "$type" "$id" "$name" "$status" "$tags" "$first" "$now")")
+}
+
+inventory_finish() {
+    local k type label tmp
+    [ -n "$ONLY_IDS" ] && return 0     # a partial run says nothing about the rest
+    title "INVENTORY"
+    for k in "${!INV_NAME[@]}"; do
+        if [ -z "${INV_SEEN[$k]+set}" ]; then
+            type=${k%%:*}; label=Container; [ "$type" = vm ] && label=VM
+            info "REMOVED $label: [${k#*:}] ${INV_NAME[$k]} (last status: ${INV_STATUS[$k]}, last seen: ${INV_LAST[$k]})"
+        fi
+    done
+    [ "$INV_HAD_PREV" = 0 ] && info "First inventory: recording ${#INV_LINES[@]} guest(s)"
+    [ "$INV_IMPORTED" = 1 ] && info "Imported the previous inventory from proxmox-stack-maintainer"
+    ok "${#INV_LINES[@]} guest(s) on this host"
+    [ "$DRY_RUN" = 1 ] && return 0
+    mkdir -p "$STATE_DIR"
+    tmp=$(mktemp "$STATE_DIR/inventory.XXXXXX") || return 0
+    printf '%s\n' "${INV_LINES[@]}" | sort -t $'\t' -k1,1 -k2,2n > "$tmp" && mv "$tmp" "$INV_FILE"
+}
+
+# ── SERVICE CHECKS (web pages that must respond after the run) ────────
+service_checks() {
+    local entry name url code t
+    [ ${#SVC_LIST[@]} -gt 0 ] || return 0
+    title "SERVICE CHECKS"
+    for entry in "${SVC_LIST[@]}"; do
+        name=${entry%%=*}; url=${entry#*=}
+        if [ "$name" = "$entry" ] || [ -z "$name" ] || [ -z "$url" ]; then
+            warn "Service check '$entry' ignored: write it as Name=URL"; continue
+        fi
+        for (( t = 1; t <= SERVICE_CHECK_TRIES; t++ )); do
+            code=$(curl -sk -L -o /dev/null -m "$SERVICE_CHECK_TIMEOUT" -w '%{http_code}' "$url" 2>/dev/null)
+            [[ "$code" =~ ^[23][0-9][0-9]$ ]] && break
+            [ "$t" -lt "$SERVICE_CHECK_TRIES" ] && sleep 10
+        done
+        if [[ "$code" =~ ^[23][0-9][0-9]$ ]]; then ok "$name — responding (HTTP $code) at $url"
+        else err "$name — not responding (HTTP ${code:-000}) at $url"; fi
+    done
+}
+
 # ── HOST ──────────────────────────────────────────────────────────────
 is_pve_pkg() {
     [[ "$1" =~ (pve|proxmox|^linux-(image|headers)|kernel|^qemu|^lxc|corosync|ceph|zfs|zpool|knet) ]]
+}
+
+# A package run holding the lock for hours is stuck, not busy: say so and skip
+stuck_lock_check() {
+    local f p age
+    command -v fuser >/dev/null 2>&1 || return 0
+    for f in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock; do
+        for p in $(fuser "$f" 2>/dev/null); do
+            age=$(ps -o etimes= -p "$p" 2>/dev/null | tr -d ' ')
+            if [[ "$age" =~ ^[0-9]+$ ]] && [ "$age" -gt 21600 ]; then
+                err "HOST — the package lock has been held for $((age / 3600)) hours by PID $p ($(ps -o args= -p "$p" 2>/dev/null)). It looks stuck, so host updates were skipped. Find out what it is waiting for before stopping it"
+                return 1
+            fi
+        done
+    done
+    return 0
 }
 
 host_update() {
@@ -593,9 +777,10 @@ host_update() {
     title "PROXMOX HOST — $(hostname)"
     if [ "$HOST_MODE" = off ]; then info "HOST — updates turned off (HOST_MODE=off)"; return; fi
     export DEBIAN_FRONTEND=noninteractive
+    stuck_lock_check || return
     [ "$DRY_RUN" = 1 ] || dpkg --configure -a >/dev/null 2>&1 </dev/null
 
-    if ! out=$(apt-get update -q 2>&1 </dev/null); then
+    if ! out=$(apt-get -o DPkg::Lock::Timeout="$APT_LOCK_WAIT" update -q 2>&1 </dev/null); then
         err "HOST — apt-get update failed"; relay "HOST —" "$(tail -n 5 <<<"$out")"; return
     fi
     while IFS= read -r p; do [ -n "$p" ] && warn "HOST — apt: $p"; done < <(grep -E '^(W|E):' <<<"$out" | head -n 5)
@@ -609,7 +794,7 @@ host_update() {
         if [ ${#all[@]} -eq 0 ]; then ok "HOST — up to date"; return; fi
         info "HOST — ${#all[@]} package(s) to upgrade: ${all[*]}"
         if [ "$DRY_RUN" = 1 ]; then info "HOST — DRY RUN: not upgrading"; return; fi
-        out=$(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade 2>&1 </dev/null); rc=$?
+        out=$(apt-get -y -q -o DPkg::Lock::Timeout="$APT_LOCK_WAIT" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade 2>&1 </dev/null); rc=$?
         relay "HOST —" "$(tail -n 15 <<<"$out")"
         if [ $rc -eq 0 ]; then ok "HOST — upgraded ${#all[@]} package(s)"
         else err "HOST — upgrade failed (exit $rc)"; fi
@@ -637,7 +822,7 @@ host_update() {
     if [ ${#safe[@]} -eq 0 ]; then return; fi
     info "HOST — ${#safe[@]} Debian package(s) to upgrade: ${safe[*]}"
     if [ "$DRY_RUN" = 1 ]; then info "HOST — DRY RUN: not upgrading"; return; fi
-    out=$(apt-get -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${safe[@]}" 2>&1 </dev/null); rc=$?
+    out=$(apt-get -y -q -o DPkg::Lock::Timeout="$APT_LOCK_WAIT" -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install --only-upgrade "${safe[@]}" 2>&1 </dev/null); rc=$?
     relay "HOST —" "$(tail -n 15 <<<"$out")"
     if [ $rc -eq 0 ]; then ok "HOST — upgraded ${#safe[@]} Debian package(s)"
     else err "HOST — upgrade failed (exit $rc)"; fi
@@ -669,11 +854,12 @@ host_reboot_check() {
 # ── MAIN ──────────────────────────────────────────────────────────────
 log ""
 log "============================================================"
-log "  ProxSweep — Proxmox stack updater"
+log "  ProxSweep $PROXSWEEP_VERSION — Proxmox stack updater"
 log "  Host : $(hostname)    Date : $(date)"
 [ "$DRY_RUN" = 1 ] && log "  DRY RUN — nothing will be changed"
 log "============================================================"
 
+inventory_load
 host_update
 
 mapfile -t CT_IDS < <(pct list 2>/dev/null </dev/null | awk 'NR>1{print $1}')
@@ -686,6 +872,8 @@ elif [ -n "$VM_NOTE" ]; then
     warn "$VM_NOTE"
 fi
 
+service_checks
+inventory_finish
 host_reboot_check
 
 log ""
