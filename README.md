@@ -27,6 +27,7 @@ Guests that run Docker get their OS packages updated as well — Docker itself i
 - **Docker containers come back.** Containers that were running before the update and are stopped afterwards are started again. Unhealthy or restart-looping containers are flagged.
 - **Persistent restart settings are checked.** Running guests without *Start at boot* (`onboot`) and Docker containers without a restart policy (`unless-stopped`/`always`) are flagged, because they stay down after a reboot. `FIX_ONBOOT=1` and `FIX_RESTART_POLICY=1` fix them.
 - **Honest results.** A package source that fails to refresh (an expired or rejected signing key, say) is flagged instead of reported as up to date. Failures (including Watchtower errors) are reported as errors, and the script exits `1` if anything failed — so cron mail or monitoring can catch it.
+- **Disk-space guard.** A guest with less than 1 GB free is not upgraded, so a nearly full disk can't leave it half-upgraded. It's reported as an error so you notice.
 - **One run at a time.** A lock stops overlapping cron runs.
 
 ## Requirements
@@ -84,6 +85,7 @@ Put any of these in `/etc/proxsweep.conf` (plain `NAME=value` lines; survives sc
 | `RESTORE_DOCKER` | `1` | Start containers that stopped during the update |
 | `FIX_RESTART_POLICY` | `0` | Set `unless-stopped` on non-compose containers that have no restart policy |
 | `FIX_ONBOOT` | `0` | Turn on *Start at boot* for running guests without it |
+| `MIN_FREE_MB` | `1024` | Don't upgrade a guest with less free space than this on `/` (reported as an error) |
 | `SKIP_IDS` | `600` | Guest IDs to skip |
 | `DRY_RUN` | `0` | Report only |
 

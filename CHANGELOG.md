@@ -15,6 +15,7 @@ Notable changes to this project. Newest first.
 - Host: Proxmox packages waiting are listed; `HOST_MODE=full` runs the Proxmox-supported dist-upgrade. Running vs installed kernel is checked.
 - Host safe mode installs the Debian updates that don't need Proxmox packages and lists the ones it held back, instead of skipping all of them.
 - A package source that fails to refresh is flagged instead of the guest being reported as up to date.
+- Guests with less than `MIN_FREE_MB` (1 GB) free are not upgraded and are reported as an error, so a full disk can't break an upgrade halfway.
 - Clearer summary: guests checked and guests with package updates (waiting, in a dry run).
 - Added `DRY_RUN`, `ONLY_IDS`, `/etc/proxsweep.conf`, a run lock and colour-free log files. README install URL and log path corrected.
 

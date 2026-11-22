@@ -45,6 +45,7 @@ CONFIG_FILE="${CONFIG_FILE:-/etc/proxsweep.conf}"
 : "${FIX_RESTART_POLICY:=0}"  # 1 = give running non-compose containers with no
                               # restart policy "unless-stopped"
 : "${FIX_ONBOOT:=0}"          # 1 = turn on "Start at boot" for running guests without it
+: "${MIN_FREE_MB:=1024}"       # skip upgrades in a guest with less free space on /
 : "${EXEC_TIMEOUT:=1800}"     # seconds allowed for one step inside a guest
 : "${SETTLE_SECONDS:=20}"     # wait before checking Docker containers came back
 
@@ -170,6 +171,7 @@ for m in apt-get apk dnf opkg; do
     if command -v "$m" >/dev/null 2>&1; then pm=$m; break; fi
 done
 echo "PS:PM=$pm"
+echo "PS:FREEMB=$(df -Pm / 2>/dev/null | awk 'NR==2{print $4}')"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     echo "PS:DOCKER=1"
     docker ps --format '{{.Names}}' | sed 's/^/PS:RUNNING=/'
@@ -456,6 +458,15 @@ process_guest() {
     docker=$(getval DOCKER "$STEP_OUT")
     before=$(grep '^PS:RUNNING=' <<<"$STEP_OUT" | cut -d= -f2-)
 
+    # Too little disk space to upgrade safely? (opkg packages are tiny, so not for opkg)
+    local free lowspace=0
+    free=$(getval FREEMB "$STEP_OUT")
+    if [ "$pm" != opkg ] && [[ "$free" =~ ^[0-9]+$ ]] && [ "$free" -lt "$MIN_FREE_MB" ]; then
+        lowspace=1
+        local msg="$P — only $free MB free on /, below the $MIN_FREE_MB MB needed to upgrade safely, so packages and Docker images are not updated. Free some space or grow the disk"
+        if [ "$DRY_RUN" = 1 ]; then warn "$msg"; else err "$msg"; fi
+    fi
+
     # Packages (also for guests that run Docker: their OS and Docker itself need updates too)
     if [ "$pm" = none ] || [ -z "$pm" ]; then
         info "$P — no supported package manager (apt/apk/dnf/opkg)"
@@ -472,6 +483,8 @@ process_guest() {
             info "$P — $pending package(s) to upgrade via $pm: $(getval LIST "$STEP_OUT")"
             if [ "$DRY_RUN" = 1 ]; then
                 info "$P — DRY RUN: not upgrading"
+            elif [ "$lowspace" = 1 ]; then
+                :
             else
                 take_snapshot "$kind" "$id" "$P" || return
                 run_step "$kind" "$id" "$P" "package upgrade" "$S_PKG_UPGRADE" "PM=$(q "$pm")"
@@ -481,7 +494,7 @@ process_guest() {
     fi
 
     # Docker
-    if [ "$docker" = 1 ] && [ "$UPDATE_DOCKER" = 1 ]; then
+    if [ "$docker" = 1 ] && [ "$UPDATE_DOCKER" = 1 ] && [ "$lowspace" != 1 ]; then
         if [ "$DRY_RUN" != 1 ]; then take_snapshot "$kind" "$id" "$P" || return; fi
         run_step "$kind" "$id" "$P" "Docker update" "$S_DOCKER_UPDATE"
     fi
