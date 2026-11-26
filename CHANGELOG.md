@@ -2,6 +2,9 @@
 
 Notable changes to this project. Newest first.
 
+## [1.2.1] - 2026-11-26
+- Fixed: scheduled runs from cron stopped straight away with "'pct' not found". cron's default PATH leaves out /usr/sbin, where Proxmox keeps `pct` and `qm`; the script now adds the standard system directories to PATH itself, so existing cron entries work without changes.
+
 ## [1.2.0] - 2026-11-22
 - Guest health checks: disk use (warning at 85%, error at 95%), swap use (warning at 90%), and processes killed for running out of memory since the last run (counted from the host's container memory counters and remembered between runs). Tagged and skipped containers are checked too. Settings: `HEALTH_CHECKS`, `DISK_WARN_PCT`, `DISK_ERR_PCT`, `SWAP_WARN_PCT`.
 

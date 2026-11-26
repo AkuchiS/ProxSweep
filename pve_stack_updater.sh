@@ -15,7 +15,13 @@
 
 set -o pipefail
 
-PROXSWEEP_VERSION="1.2.0"
+# cron (and some systemd units) start jobs with a minimal PATH such as
+# /usr/bin:/bin, which leaves out /usr/sbin, where Proxmox keeps pct and qm.
+# Put the standard system directories first so scheduled runs find them.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export PATH
+
+PROXSWEEP_VERSION="1.2.1"
 
 usage() {
     cat <<'EOF'
